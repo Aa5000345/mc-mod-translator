@@ -34,7 +34,7 @@ jobs:
           PIP_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[gui,dev]"
 
       - name: Run tests
         run: pytest -v
@@ -79,6 +79,8 @@ jobs:
         run: |
           pyinstaller --onefile --windowed `
             --name "MCModTranslator" `
+            --icon icon.ico `
+            --add-data "icon.ico;." `
             --collect-all PySide6 `
             --collect-all shiboken6 `
             --hidden-import PySide6.QtCore `
