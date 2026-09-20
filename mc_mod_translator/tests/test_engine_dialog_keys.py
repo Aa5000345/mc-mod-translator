@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-from mc_mod_translator.gui.engine_dialog import _collect_field_keys
-from mc_mod_translator.engines.registry import (
+import pytest
+
+pytest.importorskip("PySide6")
+
+from mc_mod_translator.gui.engine_dialog import _collect_field_keys  # noqa: E402
+from mc_mod_translator.engines.registry import (  # noqa: E402
     DEFAULT_ENGINE_CONFIGS,
     ENGINE_REQUIRED_FIELDS,
 )
