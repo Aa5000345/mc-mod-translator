@@ -2,9 +2,19 @@ from __future__ import annotations
 
 import pytest
 
-pytest.importorskip("PySide6")
+# 优雅处理 PySide6 不可用的情况：
+#   1. 没装 PySide6  → ModuleNotFoundError
+#   2. Linux 缺系统库（libEGL 等） → ImportError: libEGL.so.1: cannot open ...
+#   3. 其他加载失败
+# 三种情况都应该跳过此文件而不是中断整个测试收集。
+try:
+    from mc_mod_translator.gui.engine_dialog import _collect_field_keys
+except Exception as e:  # noqa: BLE001
+    pytest.skip(
+        f"PySide6 不可用，跳过 GUI 测试: {type(e).__name__}: {e}",
+        allow_module_level=True,
+    )
 
-from mc_mod_translator.gui.engine_dialog import _collect_field_keys  # noqa: E402
 from mc_mod_translator.engines.registry import (  # noqa: E402
     DEFAULT_ENGINE_CONFIGS,
     ENGINE_REQUIRED_FIELDS,
