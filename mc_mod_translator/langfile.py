@@ -63,24 +63,24 @@ def target_lang_filename(target_lang: str, fmt: str) -> str:
 
 
 def lang_filename_candidates(lang: str, fmt: str) -> List[str]:
-    """返回同一语言码在 .json/.lang 中可能出现的所有文件名。
+    """返回同一语言码在**给定格式下**可能出现的所有文件名。
 
-    用于识别旧 mod 里大小写不规范的 ``en_US.lang``、``zh_cn.lang`` 等。
+    用于识别大小写不规范的 ``zh_CN.lang`` / ``zh_cn.lang`` 等历史包袱。
+
+    - json 格式只返回 ``<lang>.json``（json 文件名规范统一，无大小写变体）
+    - lang 格式同时返回 ``zh_CN.lang`` 与 ``zh_cn.lang`` 两种变体
     """
     key = _normalize_key(lang)
     json_code, lang_code = _LANG_CODE_MAP.get(key, (key, key))
-    json_base = json_code.replace("_", "_")
-    lang_base = lang_code if "_" in lang_code else lang_code
-    # 同时包含大小写变体
-    names = {
-        f"{json_base}.json",
-        f"{json_base}.lang",
-        f"{lang_base}.lang",
-        f"{lang_base.lower()}.lang",
-    }
+
     if fmt == JSON_FORMAT:
-        return [n for n in names if n.endswith(".json")] or [f"{json_base}.json"]
-    return sorted(names)
+        return [f"{json_code}.json"]
+
+    # .lang：兼容大小写变体
+    return sorted({
+        f"{lang_code}.lang",
+        f"{lang_code.lower()}.lang",
+    })
 
 
 def parse_lang_content(content: str, fmt: str) -> Dict[str, str]:

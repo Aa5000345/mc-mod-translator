@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import httpx
 
@@ -15,19 +16,57 @@ DEFAULT_SYSTEM_PROMPT = (
 
 
 # ---------------------------------------------------------------------------
-# 统一异常体系：Translator 通过异常类型判定是否重试、是否需要等待
+# SSL 验证选项
+# ---------------------------------------------------------------------------
+
+def _ssl_verify_option() -> Union[bool, str]:
+    """返回 httpx 的 verify 参数。
+
+    - 环境变量 ``MCMT_INSECURE=1/true/yes``：禁用验证（仅供排查问题）
+    - 否则使用 certifi 的 CA bundle（最稳定，跨平台）
+    """
+    if os.environ.get("MCMT_INSECURE", "").strip().lower() in ("1", "true", "yes"):
+        return False
+    try:
+        import certifi  # type: ignore
+
+        return certifi.where()
+    except ImportError:
+        return True
+
+
+# ---------------------------------------------------------------------------
+# 统一异常体系
 # ---------------------------------------------------------------------------
 
 class EngineError(RuntimeError):
     """引擎通用错误。"""
 
 
-class EngineAuthError(EngineError):
-    """API Key 无效 / 权限不足（401/403）。不重试。"""
+class EngineFatalError(EngineError):
+    """不可恢复错误。Translator 收到后立即中止整批翻译，不做重试。
+
+    子类：
+      - ``EngineConfigError``：配置缺失或无效
+      - ``EngineAuthError``：认证失败（401/403）
+      - ``EngineQuotaError``：配额耗尽 / 频率受限且重试无意义
+    """
+
+
+class EngineConfigError(EngineFatalError):
+    """配置缺失或无效（例如未填 API Key）。"""
+
+
+class EngineAuthError(EngineFatalError):
+    """认证失败（401/403）。"""
+
+
+class EngineQuotaError(EngineFatalError):
+    """配额耗尽 / 调用频率受限且重试无法解决。"""
 
 
 class EngineRateLimitError(EngineError):
-    """429 限流。Translator 会读取 ``retry_after`` 后等待。"""
+    """429 限流。Translator 会读取 ``retry_after`` 后等待重试。"""
 
     def __init__(self, message: str, retry_after: Optional[float] = None):
         super().__init__(message)
@@ -40,6 +79,20 @@ class EngineTimeoutError(EngineError):
 
 class EngineResponseError(EngineError):
     """响应体解析失败 / 字段缺失。可以重试。"""
+
+
+# ---------------------------------------------------------------------------
+# 配置检查
+# ---------------------------------------------------------------------------
+
+def require_fields(engine_name: str, config: dict, fields: List[str]) -> None:
+    """若 ``config`` 缺少 ``fields`` 中任一非空字段，抛 ``EngineConfigError``。"""
+    cfg = config or {}
+    missing = [f for f in fields if not cfg.get(f)]
+    if missing:
+        raise EngineConfigError(
+            f"{engine_name}: 缺少配置项 {', '.join(missing)}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -87,11 +140,12 @@ def check_http_response(resp: httpx.Response, engine_name: str) -> None:
 
 def wrap_request_error(err: Exception, engine_name: str) -> Exception:
     """把 httpx 层的异常映射为引擎异常。"""
-    if isinstance(err, (EngineError,)):
+    if isinstance(err, EngineError):
         return err
     if isinstance(err, httpx.TimeoutException):
         return EngineTimeoutError(f"{engine_name}: 请求超时 ({err})")
     if isinstance(err, httpx.ConnectError):
+        # SSL 证书错误也归类为 ConnectError
         return EngineError(f"{engine_name}: 无法连接 ({err})")
     if isinstance(err, httpx.HTTPError):
         return EngineError(f"{engine_name}: HTTP 异常 ({err})")
@@ -111,6 +165,7 @@ class BaseEngine(ABC):
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(timeout, connect=10.0),
                 limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
+                verify=_ssl_verify_option(),
             )
         return self._client
 
@@ -121,10 +176,7 @@ class BaseEngine(ABC):
     async def translate_batch(
         self, texts: List[str], src: str = "en", tgt: str = "zh"
     ) -> List[str]:
-        """默认实现：顺序调用 ``translate``。
-
-        子类若支持批量 API 可覆盖此方法。
-        """
+        """默认实现：顺序调用 ``translate``。"""
         results: List[str] = []
         for t in texts:
             results.append(await self.translate(t, src, tgt))

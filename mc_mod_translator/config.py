@@ -25,25 +25,24 @@ CACHE_PATH = CONFIG_DIR / "cache.db"
 GLOSSARY_PATH = CONFIG_DIR / "glossary.csv"
 
 
-# 真正需要加密保存的字段。region 不是秘密。
 SECRET_FIELD_NAMES = {"api_key", "app_key", "app_id", "token"}
 
 
 @dataclass
 class Config:
     target_language: str = "zh_cn"
-    output_mode: str = "merged"  # merged | per_mod
+    output_mode: str = "merged"
     output_dir: str = "./output"
     auto_install: bool = False
     resourcepack_name: str = "Mods-zh_cn"
     mc_version: Optional[str] = None
     pack_format: Optional[int] = None
-    engine: str = "openai"
+    engine: str = "auto_free"
     engines: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     cache_enabled: bool = True
     glossary_enabled: bool = True
     merge_existing: bool = True
-    concurrency: int = 8
+    concurrency: int = 1                    # 免费服务限速，默认 1
 
     def to_dict(self) -> dict:
         return asdict(self)

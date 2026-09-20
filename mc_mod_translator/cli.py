@@ -10,7 +10,12 @@ from loguru import logger
 
 from .cache import TranslationCache
 from .config import CACHE_PATH, GLOSSARY_PATH, Config, load_config, save_config
-from .engines.registry import create_engine, list_engines
+from .engines.base import EngineConfigError
+from .engines.registry import (
+    create_engine,
+    list_engines,
+    missing_required_fields,
+)
 from .glossary import Glossary
 from .packager import build_merged_pack, build_per_mod_packs
 from .progress import NullProgress, SimpleProgress
@@ -58,6 +63,21 @@ def _setup_log_file(log_file: Optional[Path]) -> None:
     logger.info(f"日志将写入 {log_file}")
 
 
+def _check_engine_config(name: str, cfg: Config) -> None:
+    """前置校验引擎必填字段；缺失直接退出。"""
+    missing = missing_required_fields(name, cfg.engines.get(name, {}))
+    if not missing:
+        return
+    logger.error(
+        f"引擎 “{name}” 缺少必填配置项: {', '.join(missing)}"
+    )
+    logger.error(
+        f"请运行 `mcmt engines test --engine {name}` 查看详情，"
+        f"或在 GUI 中点击“配置引擎...”填写。"
+    )
+    raise typer.Exit(2)
+
+
 def _auto_install(pack_root: Optional[Path], packs: list[Path]) -> None:
     if pack_root is None:
         logger.warning("未提供整合包根目录，无法自动安装")
@@ -93,7 +113,6 @@ def translate(
     log_file: Optional[Path] = typer.Option(None, "--log-file", help="日志文件路径"),
     gui: bool = typer.Option(False, "--gui", help="启动 GUI 而不是 CLI 翻译"),
 ):
-    # --- --gui 分支：优先启动 GUI ---
     if gui:
         typer.echo("--gui 已设置，启动 GUI（忽略其他参数）", err=True)
         try:
@@ -128,6 +147,9 @@ def translate(
     if no_glossary:
         cfg.glossary_enabled = False
 
+    # 先检查引擎配置，避免白跑扫描
+    _check_engine_config(cfg.engine, cfg)
+
     mods_path, resolved_root = _resolve_inputs(mods_dir, pack_root)
 
     detected_version = cfg.mc_version
@@ -153,7 +175,6 @@ def translate(
         raise typer.Exit(1)
     logger.info(f"扫描到 {len(entries)} 个语言文件")
 
-    # 预览
     stats = preview_scan(mods_path, target_lang=cfg.target_language, entries=entries)
     logger.info(f"预览: {stats.summary()}")
     if stats.unique_missing_texts == 0:
@@ -201,7 +222,13 @@ def translate(
             finally:
                 await eng.aclose()
 
-        results: list[TranslatedEntry] = asyncio.run(_run_translation())
+        try:
+            results: list[TranslatedEntry] = asyncio.run(_run_translation())
+        except EngineConfigError as e:
+            sp.finish()
+            logger.error(f"引擎配置错误: {e}")
+            raise typer.Exit(2)
+
         sp.finish(f"翻译完成：{len(results)} 个语言文件")
 
         out_dir = Path(cfg.output_dir)

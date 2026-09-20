@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -36,7 +37,12 @@ from ..config import (
     load_config,
     save_config,
 )
-from ..engines.registry import ENGINE_NAMES, create_engine
+from ..engines.base import EngineFatalError
+from ..engines.registry import (
+    ENGINE_NAMES,
+    create_engine,
+    missing_required_fields,
+)
 from ..glossary import Glossary
 from ..packager import build_merged_pack, build_per_mod_packs
 from ..proofread import import_csv
@@ -63,12 +69,55 @@ TARGET_LANGS = [
 PROOFREAD_DRAFT_PATH = CONFIG_DIR / "proofread_draft.json"
 
 
+# 免费 / 低 QPS 引擎
+_LOW_QPS_ENGINES = {"auto_free", "mymemory", "google", "baidu"}
+
+# 这些引擎并发上限
+_LOW_QPS_MAX_CONCURRENCY = 1
+
+
+_FATAL_HINTS = {
+    "auto_free": (
+        "所有免费翻译服务都不可用。可能原因：\n"
+        "· 网络未连接或受限\n"
+        "· 免费服务临时不可用\n\n"
+        "建议：换用 DeepSeek（便宜且质量好），\n"
+        "在“配置引擎...”里可以查看如何注册。"
+    ),
+    "google": (
+        "Google 免费接口在中国大陆无法直连。\n"
+        "建议：换用 auto_free（MyMemory）、DeepSeek 或其他引擎。"
+    ),
+    "mymemory": (
+        "MyMemory 今日免费额度已用完。\n"
+        "建议：明天再试，或换用 DeepSeek 等其他引擎。"
+    ),
+    "baidu": (
+        "百度翻译标准版 QPS=1、每月 5 万字符免费。\n"
+        "· 请把主界面“并发数”改为 1\n"
+        "· 若仍报错，说明月额度已用尽，请去\n"
+        "  https://fanyi-api.baidu.com/choose 升级套餐或充值"
+    ),
+    "deepl": "DeepL 免费版每月 50 万字符。超出后请升级 Pro 或换引擎。",
+    "microsoft": "Azure Translator 免费层每月 200 万字符。超出后请升级或换引擎。",
+}
+
+
+def _ordered_engine_names() -> list[str]:
+    names = list(ENGINE_NAMES)
+    if "auto_free" in names:
+        names.remove("auto_free")
+        names.insert(0, "auto_free")
+    return names
+
+
 class TranslateWorker(QObject):
     log = Signal(str)
     text_progress = Signal(int, int)
     file_progress = Signal(int, int)
-    finished = Signal(object, object)  # (results, packs)
+    finished = Signal(object, object)
     failed = Signal(str)
+    fatal = Signal(str)
 
     def __init__(self, cfg: Config, pack_root: Path | None, mods_path: Path):
         super().__init__()
@@ -109,7 +158,10 @@ class TranslateWorker(QObject):
 
             engine_cfg = self.cfg.engines.get(self.cfg.engine, {})
             eng = create_engine(self.cfg.engine, engine_cfg)
-            self.log.emit(f"使用引擎 {self.cfg.engine}")
+            if self.cfg.engine == "auto_free":
+                self.log.emit(f"使用引擎 {self.cfg.engine}（免费，自动选择）")
+            else:
+                self.log.emit(f"使用引擎 {self.cfg.engine}")
 
             cache = TranslationCache(CACHE_PATH) if self.cfg.cache_enabled else None
             glossary = Glossary()
@@ -140,7 +192,6 @@ class TranslateWorker(QObject):
 
             results: list[TranslatedEntry] = asyncio.run(_run_translation())
 
-            # 文件进度收尾：所有条目均已合并完成
             self.file_progress.emit(len(entries), len(entries))
 
             out_dir = Path(self.cfg.output_dir)
@@ -173,8 +224,19 @@ class TranslateWorker(QObject):
                 self.log.emit(f"已安装 {len(packs)} 个资源包到 {rp}")
 
             self.finished.emit(results, packs)
+
+        except EngineFatalError as e:
+            self.log.emit(traceback.format_exc())
+            hint = _FATAL_HINTS.get(self.cfg.engine, "")
+            msg = str(e)
+            if hint:
+                msg = f"{msg}\n\n{hint}"
+            self.fatal.emit(msg)
+
         except Exception as e:  # noqa: BLE001
-            self.failed.emit(f"{e}\n{traceback.format_exc()}")
+            self.log.emit(traceback.format_exc())
+            self.failed.emit(f"{type(e).__name__}: {e}")
+
         finally:
             if cache is not None:
                 try:
@@ -191,7 +253,6 @@ class MainWindow(QMainWindow):
         self.state: GuiState = load_gui_state()
         self.cfg: Config = load_config()
 
-        # 恢复窗口几何
         self.resize(
             self.state.window_width or 1180,
             self.state.window_height or 820,
@@ -202,6 +263,7 @@ class MainWindow(QMainWindow):
         self.current_results: list[TranslatedEntry] = []
         self.worker_thread: QThread | None = None
         self.worker: TranslateWorker | None = None
+        self._suppress_engine_change = True
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -232,9 +294,9 @@ class MainWindow(QMainWindow):
         path_layout.addRow("整合包根目录", row1)
         path_layout.addRow("mods 文件夹", row2)
 
-        self.mc_version_edit = QLineEdit_safe(self.cfg.mc_version or "")
+        self.mc_version_edit = QLineEdit(self.cfg.mc_version or "")
         self.mc_version_edit.setPlaceholderText("留空自动检测，例如 1.20.1")
-        self.pack_format_edit = QLineEdit_safe(
+        self.pack_format_edit = QLineEdit(
             "" if self.cfg.pack_format is None else str(self.cfg.pack_format)
         )
         self.pack_format_edit.setPlaceholderText("留空自动计算")
@@ -245,7 +307,6 @@ class MainWindow(QMainWindow):
         out_box = QGroupBox("输出")
         out_layout = QFormLayout(out_box)
 
-        # 若 cfg 或 state 都有值，优先 state
         output_text = self.state.output_dir or self.cfg.output_dir
         if self.state.pack_root and output_text in ("", "./output"):
             output_text = default_output_for(self.state.pack_root, "")
@@ -291,7 +352,8 @@ class MainWindow(QMainWindow):
         eng_box = QGroupBox("翻译引擎")
         eng_layout = QFormLayout(eng_box)
         self.engine_combo = QComboBox()
-        self.engine_combo.addItems(ENGINE_NAMES)
+        for n in _ordered_engine_names():
+            self.engine_combo.addItem(n)
         if self.cfg.engine in ENGINE_NAMES:
             self.engine_combo.setCurrentText(self.cfg.engine)
         btn_eng_cfg = QPushButton("配置引擎...")
@@ -305,6 +367,13 @@ class MainWindow(QMainWindow):
         self.concurrency_spin.setRange(1, 64)
         self.concurrency_spin.setValue(self.cfg.concurrency)
         eng_layout.addRow("并发数", self.concurrency_spin)
+
+        self.engine_hint_label = QLabel()
+        self.engine_hint_label.setWordWrap(True)
+        self.engine_hint_label.setStyleSheet("color: #666;")
+        eng_layout.addRow("", self.engine_hint_label)
+
+        self.engine_combo.currentTextChanged.connect(self._on_engine_changed)
 
         # ---------- 操作按钮 ----------
         btn_row = QHBoxLayout()
@@ -345,15 +414,7 @@ class MainWindow(QMainWindow):
         self.table = QTableWidget()
         self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(
-            [
-                "Mod",
-                "语言文件",
-                "已有 key",
-                "缺失 key",
-                "新增翻译",
-                "缓存命中",
-                "失败",
-            ]
+            ["Mod", "语言文件", "已有 key", "缺失 key", "新增翻译", "缓存命中", "失败"]
         )
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
@@ -367,6 +428,24 @@ class MainWindow(QMainWindow):
         root.addWidget(self.table, 2)
         root.addWidget(QLabel("日志"))
         root.addWidget(self.log_view, 2)
+
+        self._suppress_engine_change = False
+        self._on_engine_changed(self.engine_combo.currentText())
+
+    # ---------- 引擎切换 ----------
+    def _on_engine_changed(self, name: str) -> None:
+        if self._suppress_engine_change:
+            return
+        if name in _LOW_QPS_ENGINES and self.concurrency_spin.value() > _LOW_QPS_MAX_CONCURRENCY:
+            self.concurrency_spin.setValue(_LOW_QPS_MAX_CONCURRENCY)
+            self._log(
+                f"引擎 {name} 建议低并发，已把并发数调整为 {_LOW_QPS_MAX_CONCURRENCY}"
+            )
+
+        from .engine_dialog import ENGINE_HINTS
+        hint = ENGINE_HINTS.get(name, "")
+        self.engine_hint_label.setText(hint)
+        self.engine_hint_label.setVisible(bool(hint))
 
     # ---------- 选择路径 ----------
     def _pick_pack_root(self):
@@ -389,7 +468,6 @@ class MainWindow(QMainWindow):
         self._maybe_fill_output(path)
 
     def _maybe_fill_output(self, pack_root: str) -> None:
-        """若输出目录还是默认值，按整合包目录推荐。"""
         cur = self.output_dir_edit.text().strip()
         if cur in ("", "./output"):
             self.output_dir_edit.setText(default_output_for(pack_root, ""))
@@ -400,8 +478,7 @@ class MainWindow(QMainWindow):
         if dlg.exec():
             self.cfg.engines = dlg.result_engines()
             QMessageBox.information(
-                self,
-                "提示",
+                self, "提示",
                 "引擎配置已更新到内存。还需要在主窗口点“保存配置”写入磁盘。",
             )
 
@@ -455,8 +532,7 @@ class MainWindow(QMainWindow):
 
         if stats.unique_missing_texts == 0:
             QMessageBox.information(
-                self,
-                "无需翻译",
+                self, "无需翻译",
                 f"共 {stats.total_keys} 个 key，全部已有翻译。\n"
                 f"（如果想重新翻译已有内容，请取消勾选“保留已有 zh_cn 翻译”）",
             )
@@ -476,11 +552,8 @@ class MainWindow(QMainWindow):
             f"是否开始翻译？"
         )
         ans = QMessageBox.question(
-            self,
-            "翻译预览",
-            msg,
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes,
+            self, "翻译预览", msg,
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
         )
         return ans == QMessageBox.Yes
 
@@ -507,22 +580,15 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "错误", "无法定位 mods 目录")
             return
 
-        engine_cfg = self.cfg.engines.get(self.engine_combo.currentText(), {})
-        api_key = engine_cfg.get("api_key", "")
-        if self.engine_combo.currentText() in {
-            "openai",
-            "deepseek",
-            "moonshot",
-            "qwen",
-            "openrouter",
-            "claude",
-            "gemini",
-        } and not api_key:
+        engine_name = self.engine_combo.currentText()
+        engine_cfg = self.cfg.engines.get(engine_name, {})
+        missing = missing_required_fields(engine_name, engine_cfg)
+        if missing:
             QMessageBox.warning(
-                self,
-                "提示",
-                f"引擎 {self.engine_combo.currentText()} 未配置 api_key，"
-                f"请先点击“配置引擎...”填写。",
+                self, "引擎配置不完整",
+                f"引擎 “{engine_name}” 缺少以下必填项：\n\n"
+                + "\n".join(f"  • {m}" for m in missing)
+                + "\n\n请点击“配置引擎...”填写后再试。",
             )
             return
 
@@ -549,8 +615,10 @@ class MainWindow(QMainWindow):
         self.worker.file_progress.connect(self._on_file_progress)
         self.worker.finished.connect(self._on_finished)
         self.worker.failed.connect(self._on_failed)
+        self.worker.fatal.connect(self._on_fatal)
         self.worker.finished.connect(self.worker_thread.quit)
         self.worker.failed.connect(self.worker_thread.quit)
+        self.worker.fatal.connect(self.worker_thread.quit)
         self.worker_thread.finished.connect(self._cleanup_thread)
         self.btn_start.setEnabled(False)
         self.btn_cancel.setEnabled(True)
@@ -584,9 +652,7 @@ class MainWindow(QMainWindow):
         self.table.setRowCount(len(results))
         for r, te in enumerate(results):
             existing_cnt = len(te.entry.existing)
-            missing_cnt = sum(
-                1 for k in te.entry.source if k not in te.entry.existing
-            )
+            missing_cnt = sum(1 for k in te.entry.source if k not in te.entry.existing)
             self.table.setItem(r, 0, QTableWidgetItem(te.entry.mod_id))
             self.table.setItem(r, 1, QTableWidgetItem(te.entry.lang_path))
             self.table.setItem(r, 2, QTableWidgetItem(str(existing_cnt)))
@@ -606,8 +672,12 @@ class MainWindow(QMainWindow):
                 self._log(f"  - [{mod_id}] {key}: {src[:60]!r}")
 
     def _on_failed(self, msg: str):
-        self._log("[失败] " + msg)
+        self._log(f"[失败] {msg}")
         QMessageBox.critical(self, "失败", msg)
+
+    def _on_fatal(self, msg: str):
+        self._log(f"[致命] {msg}")
+        QMessageBox.critical(self, "翻译中止", msg)
 
     # ---------- 校对 ----------
     def _open_proofread(self):
@@ -637,9 +707,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "提示", "没有任何修改")
                 return
             self._save_proofread_csv(edits)
-            QMessageBox.information(
-                self, "完成", f"已保存 {len(edits)} 条校对结果"
-            )
+            QMessageBox.information(self, "完成", f"已保存 {len(edits)} 条校对结果")
 
     def _save_proofread_csv(self, rows):
         out = Path(self.cfg.output_dir) / "proofread.csv"
@@ -647,14 +715,8 @@ class MainWindow(QMainWindow):
         with out.open("w", encoding="utf-8", newline="") as f:
             w = csv.writer(f)
             w.writerow(
-                [
-                    "mod_id",
-                    "key",
-                    "source",
-                    "machine_translation",
-                    "proofread_translation",
-                    "status",
-                ]
+                ["mod_id", "key", "source", "machine_translation",
+                 "proofread_translation", "status"]
             )
             for mod_id, key, src, mt, proof in rows:
                 w.writerow([mod_id, key, src, mt, proof, "approved" if proof else ""])
@@ -665,9 +727,7 @@ class MainWindow(QMainWindow):
         glossary.load(GLOSSARY_PATH)
         try:
             n = import_csv(
-                out,
-                cache,
-                glossary,
+                out, cache, glossary,
                 engine_name=MANUAL_ENGINE,
                 tgt_lang=self.cfg.target_language,
             )
@@ -677,9 +737,7 @@ class MainWindow(QMainWindow):
             cache.close()
 
     def _import_proofread(self):
-        f, _ = QFileDialog.getOpenFileName(
-            self, "选择校对文件", "", "CSV (*.csv)"
-        )
+        f, _ = QFileDialog.getOpenFileName(self, "选择校对文件", "", "CSV (*.csv)")
         if not f:
             return
         cache = TranslationCache(CACHE_PATH)
@@ -687,9 +745,7 @@ class MainWindow(QMainWindow):
         glossary.load(GLOSSARY_PATH)
         try:
             n = import_csv(
-                Path(f),
-                cache,
-                glossary,
+                Path(f), cache, glossary,
                 engine_name=MANUAL_ENGINE,
                 tgt_lang=self.cfg.target_language,
             )
@@ -700,6 +756,17 @@ class MainWindow(QMainWindow):
 
     # ---------- 生命周期 ----------
     def closeEvent(self, event):  # noqa: N802
+        if self.worker_thread is not None and self.worker_thread.isRunning():
+            try:
+                if self.worker is not None:
+                    self.worker.request_cancel()
+                self.worker_thread.quit()
+                if not self.worker_thread.wait(5000):
+                    self.worker_thread.terminate()
+                    self.worker_thread.wait(1000)
+            except Exception:
+                pass
+
         try:
             self._sync_ui_to_cfg()
             state = GuiState(
@@ -714,8 +781,5 @@ class MainWindow(QMainWindow):
             save_gui_state(state)
         except Exception:
             pass
+
         super().closeEvent(event)
-
-
-# 延迟导入 QLineEdit，避免顶部 import 被 PySide6 名字占满导致可读性下降
-from PySide6.QtWidgets import QLineEdit as QLineEdit_safe  # noqa: E402

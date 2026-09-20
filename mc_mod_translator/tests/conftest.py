@@ -8,8 +8,15 @@ from pathlib import Path
 import pytest
 
 
-# 让 tests 目录能直接 import mc_mod_translator.*
-ROOT = Path(__file__).resolve().parent.parent
+def _find_repo_root(start: Path) -> Path:
+    """从 start 向上查找含 ``pyproject.toml`` 的目录，作为仓库根。"""
+    for p in [start, *start.parents]:
+        if (p / "pyproject.toml").exists():
+            return p
+    return start
+
+
+ROOT = _find_repo_root(Path(__file__).resolve())
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -20,13 +27,12 @@ def tmp_jar(tmp_path: Path):
 
     def _make(
         name: str,
-        files: dict,  # {zip内路径: 文本}
+        files: dict,
         sub_jar: bool = False,
         sub_name: str = "META-INF/jarjar/nested.jar",
     ) -> Path:
         jar_path = tmp_path / name
         if sub_jar:
-            # 先构造内层 jar
             inner = tmp_path / "_inner.jar"
             with zipfile.ZipFile(inner, "w") as zf:
                 for k, v in files.items():

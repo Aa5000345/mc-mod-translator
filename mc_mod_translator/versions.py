@@ -29,18 +29,33 @@ PACK_FORMAT_TABLE = [
     ((1, 21, 5), (1, 21, 5), 55),
 ]
 
-# 允许 "1.20.1" 以及 "1.20.1-forge-47.2.0" 这类目录名；提取前缀纯版本号
+# 允许 "1.20.1" 以及 "1.20.1-forge-47.2.0" 这类目录名；只取前缀纯版本号
 _VERSION_RE = re.compile(r"^(\d+(?:\.\d+){1,3})")
 
 
 def parse_version(v: str) -> Tuple[int, ...]:
+    """把版本字符串解析为**固定 3 元组**，便于与 ``PACK_FORMAT_TABLE`` 比较。
+
+    - ``"1.20.1"`` -> ``(1, 20, 1)``
+    - ``"1.20"``   -> ``(1, 20, 0)``（补齐 patch 位）
+    - ``"1"``      -> ``(1, 0, 0)``（补齐 minor/patch 位）
+    - ``""``       -> ``()``（保留“无法解析”语义）
+    - ``"abc"``    -> ``()``
+    """
+    if not v or not v.strip():
+        return ()
     parts: List[int] = []
     for p in v.split("."):
         try:
             parts.append(int(p))
         except ValueError:
             break
-    return tuple(parts)
+    if not parts:
+        return ()
+    # 补齐到 3 位，与 PACK_FORMAT_TABLE 的 (major, minor, patch) 对齐
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts[:3])
 
 
 def pack_format_for(version: str) -> int:
@@ -56,7 +71,9 @@ def pack_format_for(version: str) -> int:
 
 
 def uses_json_lang(version: str) -> bool:
-    return parse_version(version) >= (1, 13, 0)
+    """1.13 起语言文件从 .lang 切换到 .json。"""
+    v = parse_version(version)
+    return v >= (1, 13, 0)
 
 
 def _extract_versions(dir_path: Path) -> List[str]:

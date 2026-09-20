@@ -19,8 +19,10 @@ from typing import List, Optional
 from .base import (
     BaseEngine,
     DEFAULT_SYSTEM_PROMPT,
+    EngineQuotaError,
     EngineResponseError,
     check_http_response,
+    require_fields,
     wrap_request_error,
 )
 
@@ -85,8 +87,7 @@ class OpenAIEngine(BaseEngine):
         return f"{base_url.rstrip('/')}/chat/completions"
 
     def _require_key(self) -> None:
-        if not self.config.get("api_key"):
-            raise RuntimeError(f"{self.name}: 缺少 api_key")
+        require_fields(self.name, self.config, ["api_key"])
 
     async def translate(self, text: str, src: str = "en", tgt: str = "zh") -> str:
         self._require_key()
@@ -164,7 +165,6 @@ class OpenAIEngine(BaseEngine):
 
         arr = _parse_json_array(content)
         if arr is None or len(arr) != len(texts):
-            # 回退到逐条
             return await asyncio.gather(
                 *(self.translate(t, src, tgt) for t in texts)
             )
@@ -175,14 +175,13 @@ class ClaudeEngine(BaseEngine):
     name = "claude"
 
     async def translate(self, text: str, src: str = "en", tgt: str = "zh") -> str:
+        require_fields(self.name, self.config, ["api_key"])
         cfg = self.config
-        api_key = cfg.get("api_key", "")
+        api_key = cfg["api_key"]
         model = cfg.get("model", "claude-3-5-sonnet-latest")
         base_url = cfg.get("base_url", "https://api.anthropic.com/v1/messages")
         system = cfg.get("system_prompt") or DEFAULT_SYSTEM_PROMPT
         max_tokens = int(cfg.get("max_tokens", 2048))
-        if not api_key:
-            raise RuntimeError("claude: 缺少 api_key")
 
         client = self._get_client(timeout=90.0)
         try:
@@ -215,12 +214,11 @@ class GeminiEngine(BaseEngine):
     name = "gemini"
 
     async def translate(self, text: str, src: str = "en", tgt: str = "zh") -> str:
+        require_fields(self.name, self.config, ["api_key"])
         cfg = self.config
-        api_key = cfg.get("api_key", "")
+        api_key = cfg["api_key"]
         model = cfg.get("model", "gemini-1.5-flash")
         system = cfg.get("system_prompt") or DEFAULT_SYSTEM_PROMPT
-        if not api_key:
-            raise RuntimeError("gemini: 缺少 api_key")
 
         url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/"
@@ -339,11 +337,10 @@ class DeepLEngine(BaseEngine):
     _LANG_MAP = {"zh": "ZH", "zh_cn": "ZH", "zh-CN": "ZH", "zh_tw": "ZH", "en": "EN"}
 
     async def translate(self, text: str, src: str = "en", tgt: str = "zh") -> str:
+        require_fields(self.name, self.config, ["api_key"])
         cfg = self.config
-        api_key = cfg.get("api_key", "")
+        api_key = cfg["api_key"]
         base = cfg.get("base_url") or "https://api-free.deepl.com/v2/translate"
-        if not api_key:
-            raise RuntimeError("deepl: 缺少 api_key")
 
         client = self._get_client(timeout=60.0)
         try:
@@ -378,11 +375,10 @@ class MicrosoftEngine(BaseEngine):
     }
 
     async def translate(self, text: str, src: str = "en", tgt: str = "zh") -> str:
+        require_fields(self.name, self.config, ["api_key"])
         cfg = self.config
-        api_key = cfg.get("api_key", "")
+        api_key = cfg["api_key"]
         region = cfg.get("region", "global")
-        if not api_key:
-            raise RuntimeError("microsoft: 缺少 api_key")
 
         url = "https://api.cognitive.microsofttranslator.com/translate"
         params = {
@@ -416,11 +412,10 @@ class BaiduEngine(BaseEngine):
     _LANG_MAP = {"zh": "zh", "zh_cn": "zh", "zh-CN": "zh", "en": "en"}
 
     async def translate(self, text: str, src: str = "en", tgt: str = "zh") -> str:
+        require_fields(self.name, self.config, ["app_id", "app_key"])
         cfg = self.config
-        appid = cfg.get("app_id", "")
-        key = cfg.get("app_key", "")
-        if not appid or not key:
-            raise RuntimeError("baidu: 缺少 app_id / app_key")
+        appid = cfg["app_id"]
+        key = cfg["app_key"]
 
         salt = str(random.randint(10000, 99999))
         sign = hashlib.md5((appid + text + salt + key).encode("utf-8")).hexdigest()
@@ -441,6 +436,23 @@ class BaiduEngine(BaseEngine):
             raise wrap_request_error(e, self.name) from e
         check_http_response(resp, self.name)
         data = resp.json()
+
+        # ---- 识别百度业务错误码 ----
+        # 参考：https://fanyi-api.baidu.com/doc/21
+        if "error_code" in data:
+            code = str(data.get("error_code", ""))
+            msg = data.get("error_msg", "未知错误")
+
+            # 54003 / 54004 无法通过重试解决
+            if code in ("54003", "54004"):
+                raise EngineQuotaError(
+                    f"baidu: {msg} ({code})。"
+                    f"请降低并发数（建议改为 1），"
+                    f"或去 https://fanyi-api.baidu.com/choose 升级套餐/充值。"
+                )
+            # 54001 签名错误；52001 请求超时；其它按响应错误处理
+            raise EngineResponseError(f"baidu 错误 ({code}): {msg}")
+
         if "trans_result" not in data:
             raise EngineResponseError(f"baidu 错误: {data}")
         return "\n".join(item["dst"] for item in data["trans_result"])

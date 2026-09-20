@@ -7,15 +7,22 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .cache import TranslationCache
-from .engines.base import BaseEngine
+from .engines.base import (
+    BaseEngine,
+    EngineFatalError,
+    EngineRateLimitError,
+)
 from .glossary import Glossary
 from .placeholder import protect, restore, validate_restore
 from .scanner import LangEntry
 
 
-# 人工校对统一使用的引擎名。CLI/GUI 导入校对时写入此名。
-# Translator 会优先于当前引擎缓存查找它。
 MANUAL_ENGINE = "manual"
+
+_SRC_GLOSSARY = "glossary"
+_SRC_MANUAL = "manual"
+_SRC_CACHE = "cache"
+_SRC_ENGINE = "engine"
 
 
 @dataclass
@@ -31,7 +38,6 @@ class TranslatedEntry:
 def _clean_llm_output(text: str) -> str:
     """去掉 Markdown 代码块、多余引号、解释性前缀。"""
     t = text.strip()
-    # 去掉 ```lang\n...\n```
     if t.startswith("```"):
         lines = t.splitlines()
         if lines and lines[0].startswith("```"):
@@ -49,7 +55,7 @@ def _clean_llm_output(text: str) -> str:
         "Translated:",
     ):
         if t.startswith(prefix):
-            t = t[len(prefix) :].strip()
+            t = t[len(prefix):].strip()
     if len(t) >= 2 and t[0] == t[-1] and t[0] in ('"', "'", "“", "”", "「", "」"):
         t = t[1:-1].strip()
     return t
@@ -78,14 +84,12 @@ class Translator:
         self.progress_cb = progress_cb or (lambda done, total: None)
         self.cancel_event = cancel_event
 
-    # ---------- helpers ----------
     def _log(self, msg: str) -> None:
         self.log_cb(msg)
 
     def _is_cancelled(self) -> bool:
         return self.cancel_event is not None and self.cancel_event.is_set()
 
-    # ---------- 主流程 ----------
     async def translate_entries(
         self, entries: List[LangEntry], target_lang: str = "zh_cn"
     ) -> List[TranslatedEntry]:
@@ -103,6 +107,7 @@ class Translator:
         self._log(f"共 {len(unique_texts)} 条唯一文本待处理")
 
         resolved: Dict[str, str] = {}
+        resolved_from: Dict[str, str] = {}
 
         # 2. 术语表
         from_glossary = 0
@@ -111,6 +116,7 @@ class Translator:
             hit = self.glossary.lookup(text) if self.glossary else None
             if hit:
                 resolved[text] = hit
+                resolved_from[text] = _SRC_GLOSSARY
                 from_glossary += 1
             else:
                 remaining.append(text)
@@ -125,6 +131,7 @@ class Translator:
             )
             for src, tr in manual_hits.items():
                 resolved[src] = tr
+                resolved_from[src] = _SRC_MANUAL
                 from_manual += 1
             remaining = [t for t in remaining if t not in manual_hits]
             if from_manual:
@@ -138,6 +145,7 @@ class Translator:
             )
             for src, tr in engine_hits.items():
                 resolved[src] = tr
+                resolved_from[src] = _SRC_CACHE
                 from_cache += 1
             remaining = [t for t in remaining if t not in engine_hits]
             if from_cache:
@@ -152,19 +160,29 @@ class Translator:
         done = 0
         lock = asyncio.Lock()
 
+        abort_event = threading.Event()
+        first_fatal: List[Optional[Exception]] = [None]
+
         async def worker(text: str) -> Tuple[str, Optional[str], Optional[str]]:
             nonlocal done
+
+            async def _tick():
+                nonlocal done
+                async with lock:
+                    done += 1
+                    self.progress_cb(done, total)
+
             async with sem:
-                if self._is_cancelled():
-                    async with lock:
-                        done += 1
-                        self.progress_cb(done, total)
+                if self._is_cancelled() or abort_event.is_set():
+                    await _tick()
                     return text, None, "cancelled"
+
                 protected, placeholders = protect(text)
                 out: Optional[str] = None
                 last_err: Optional[str] = None
+
                 for attempt in range(self.max_retries):
-                    if self._is_cancelled():
+                    if self._is_cancelled() or abort_event.is_set():
                         last_err = "cancelled"
                         break
                     try:
@@ -177,9 +195,35 @@ class Translator:
                         candidate = _clean_llm_output(candidate)
                         if not candidate:
                             raise RuntimeError("引擎返回空译文")
+                        # 引擎返回原文 = 翻译失败（不重试）
+                        if candidate.strip() == text.strip():
+                            last_err = "引擎返回原文"
+                            out = None
+                            break
                         out = candidate
                         last_err = None
                         break
+
+                    except EngineFatalError as e:
+                        last_err = f"{type(e).__name__}: {e}"
+                        if first_fatal[0] is None:
+                            first_fatal[0] = e
+                        abort_event.set()
+                        break
+
+                    except EngineRateLimitError as e:
+                        last_err = f"{type(e).__name__}: {e}"
+                        if attempt < self.max_retries - 1:
+                            if e.retry_after and e.retry_after > 0:
+                                delay = float(e.retry_after)
+                            else:
+                                delay = (2 ** attempt) + random.random()
+                            self._log(
+                                f"[限流] {text[:40]!r} 第 {attempt + 1} 次失败: "
+                                f"{last_err}，{delay:.2f}s 后重试"
+                            )
+                            await asyncio.sleep(delay)
+
                     except Exception as e:  # noqa: BLE001
                         last_err = f"{type(e).__name__}: {e}"
                         if attempt < self.max_retries - 1:
@@ -189,9 +233,8 @@ class Translator:
                                 f"{last_err}，{delay:.2f}s 后重试"
                             )
                             await asyncio.sleep(delay)
-                async with lock:
-                    done += 1
-                    self.progress_cb(done, total)
+
+                await _tick()
                 return text, out, last_err
 
         if pending:
@@ -199,13 +242,23 @@ class Translator:
             to_cache: List[Tuple[str, str]] = []
             failed: List[Tuple[str, str]] = []
             for text, out, err in outcomes:
-                if out is not None:
-                    resolved[text] = out
-                    to_cache.append((text, out))
-                else:
+                if out is None:
                     failed.append((text, err or "unknown"))
+                    continue
+                # 双保险：即使 worker 没拦住，这里也再判一次
+                if out.strip() == text.strip():
+                    failed.append((text, "引擎返回原文"))
+                    continue
+                resolved[text] = out
+                resolved_from[text] = _SRC_ENGINE
+                to_cache.append((text, out))
+
             if self.cache and to_cache:
                 self.cache.put_many(to_cache, self.engine.name, "en", target_lang)
+
+            if first_fatal[0] is not None:
+                raise first_fatal[0]
+
             if failed:
                 self._log(f"失败 {len(failed)} 条（示例前 5）:")
                 for t, err in failed[:5]:
@@ -216,6 +269,7 @@ class Translator:
         for e in entries:
             merged: Dict[str, str] = dict(e.existing) if self.merge_existing else {}
             new_keys = 0
+            cached_keys = 0
             failed_keys = 0
             failed_pairs: List[Tuple[str, str]] = []
             for key, src_text in e.source.items():
@@ -225,7 +279,11 @@ class Translator:
                     continue
                 if src_text in resolved:
                     merged[key] = resolved[src_text]
-                    new_keys += 1
+                    kind = resolved_from.get(src_text, _SRC_ENGINE)
+                    if kind == _SRC_ENGINE:
+                        new_keys += 1
+                    else:
+                        cached_keys += 1
                 else:
                     merged[key] = src_text
                     failed_keys += 1
@@ -236,7 +294,7 @@ class Translator:
                     entry=e,
                     merged=merged,
                     new_keys=new_keys,
-                    cached_keys=0,
+                    cached_keys=cached_keys,
                     failed_keys=failed_keys,
                     failed_pairs=failed_pairs,
                 )

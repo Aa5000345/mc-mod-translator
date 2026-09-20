@@ -11,9 +11,13 @@ from mc_mod_translator.versions import (
 
 
 def test_parse_version():
+    # 三位补齐：便于与 PACK_FORMAT_TABLE 的三元组比较
     assert parse_version("1.20.1") == (1, 20, 1)
-    assert parse_version("1.20") == (1, 20)
+    assert parse_version("1.20") == (1, 20, 0)
+    assert parse_version("1") == (1, 0, 0)
+    # 空 / 非法保留“无法解析”语义
     assert parse_version("") == ()
+    assert parse_version("abc") == ()
 
 
 def test_pack_format_for():

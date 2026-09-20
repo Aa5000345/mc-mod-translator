@@ -1,16 +1,50 @@
-from .base import BaseEngine, DEFAULT_SYSTEM_PROMPT
+from .base import (
+    BaseEngine,
+    DEFAULT_SYSTEM_PROMPT,
+    EngineAuthError,
+    EngineConfigError,
+    EngineError,
+    EngineFatalError,
+    EngineQuotaError,
+    EngineRateLimitError,
+    EngineResponseError,
+    EngineTimeoutError,
+    check_http_response,
+    require_fields,
+    wrap_request_error,
+)
+from .free import AutoFreeEngine, MyMemoryEngine
 from .registry import (
-    ENGINE_NAMES,
     DEFAULT_ENGINE_CONFIGS,
+    ENGINE_NAMES,
+    ENGINE_REQUIRED_FIELDS,
     create_engine,
     list_engines,
+    missing_required_fields,
+    validate_engine_config,
 )
 
 __all__ = [
     "BaseEngine",
     "DEFAULT_SYSTEM_PROMPT",
+    "EngineError",
+    "EngineFatalError",
+    "EngineConfigError",
+    "EngineAuthError",
+    "EngineQuotaError",
+    "EngineRateLimitError",
+    "EngineTimeoutError",
+    "EngineResponseError",
+    "check_http_response",
+    "require_fields",
+    "wrap_request_error",
+    "AutoFreeEngine",
+    "MyMemoryEngine",
     "ENGINE_NAMES",
     "DEFAULT_ENGINE_CONFIGS",
+    "ENGINE_REQUIRED_FIELDS",
     "create_engine",
     "list_engines",
+    "missing_required_fields",
+    "validate_engine_config",
 ]

@@ -50,16 +50,20 @@ def test_restore_tolerates_engine_spaces():
 
 
 def test_validate_restore_ok():
+    """还原之后应当通过校验。"""
     text = "A %s B"
     protected, ph = protect(text)
     translated = protected.replace("A", "甲").replace("B", "乙")
-    assert validate_restore(translated, ph)
+    # 关键：先 restore 再 validate
+    restored = restore(translated, ph)
+    assert restored == "甲 %s 乙"
+    assert validate_restore(restored, ph)
 
 
 def test_validate_restore_residue():
+    """译文中仍残留 __PH_N__ 视为失败。"""
     text = "A %s B"
     protected, ph = protect(text)
-    # 引擎没还原占位符
     assert not validate_restore(protected, ph)
 
 
