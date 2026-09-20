@@ -23,19 +23,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libegl1 \
-            libgl1 \
-            libxkbcommon-x11-0 \
-            libxcb-cursor0 \
-            libxcb-xinerama0 \
-            libxcb-icccm4 \
-            libxcb-image0 \
-            libxcb-keysyms1 \
-            libxcb-randr0 \
-            libxcb-render-util0 \
-            libxcb-shape0 \
-            libxcb-xfixes0 \
-            libdbus-1-3
+            libegl1 libgl1 \
+            libxkbcommon-x11-0 libxcb-cursor0 libxcb-xinerama0 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
+            libxcb-xfixes0 libdbus-1-3
 
       - name: Install dependencies
         env:
@@ -47,23 +39,9 @@ jobs:
       - name: Run tests
         run: pytest -v
 
-  build:
+  build-windows:
     needs: test
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            artifact_name: MCModTranslator-Windows
-            asset_name: MCModTranslator.exe
-          - os: ubuntu-latest
-            artifact_name: MCModTranslator-Linux
-            asset_name: MCModTranslator
-          - os: macos-latest
-            artifact_name: MCModTranslator-macOS
-            asset_name: MCModTranslator
-
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -81,8 +59,7 @@ jobs:
           pip install -e ".[gui]"
           pip install pyinstaller
 
-      - name: Build with PyInstaller (Windows)
-        if: runner.os == 'Windows'
+      - name: Build with PyInstaller
         shell: pwsh
         run: |
           pyinstaller --onefile --windowed `
@@ -103,53 +80,23 @@ jobs:
             --noconfirm --clean `
             launcher.py
 
-      - name: Build with PyInstaller (Linux / macOS)
-        if: runner.os != 'Windows'
-        run: |
-          pyinstaller --onefile \
-            --name "MCModTranslator" \
-            --collect-all PySide6 \
-            --collect-all shiboken6 \
-            --hidden-import PySide6.QtCore \
-            --hidden-import PySide6.QtGui \
-            --hidden-import PySide6.QtWidgets \
-            --hidden-import PySide6.QtSvg \
-            --exclude-module PyQt5 \
-            --exclude-module PyQt6 \
-            --exclude-module tkinter \
-            --exclude-module transformers \
-            --exclude-module torch \
-            --noconfirm --clean \
-            launcher.py
-
-      - name: Rename executable (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          Move-Item "dist/MCModTranslator.exe" "dist/${{ matrix.asset_name }}"
-
-      - name: Rename executable (Linux / macOS)
-        if: runner.os != 'Windows'
-        run: |
-          mv "dist/MCModTranslator" "dist/${{ matrix.asset_name }}"
-          chmod +x "dist/${{ matrix.asset_name }}"
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact_name }}
-          path: dist/${{ matrix.asset_name }}
+          name: MCModTranslator-Windows
+          path: dist/MCModTranslator.exe
           retention-days: 7
 
   release:
-    needs: build
+    needs: build-windows
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all artifacts
+      - name: Download artifact
         uses: actions/download-artifact@v4
         with:
+          name: MCModTranslator-Windows
           path: release-assets
 
       - name: List downloaded files
@@ -173,7 +120,4 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: ${{ steps.detect.outputs.is_prerelease == 'true' }}
-          files: |
-            release-assets/MCModTranslator-Windows/MCModTranslator.exe
-            release-assets/MCModTranslator-Linux/MCModTranslator
-            release-assets/MCModTranslator-macOS/MCModTranslator
+          files: release-assets/MCModTranslator.exe
