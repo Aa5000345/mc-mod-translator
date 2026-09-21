@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mc-mod-translator"
-version = "0.3.0"
+version = "0.3.1"
 description = "Minecraft mod automatic translation tool"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -31,7 +31,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gui = ["PySide6>=6.6"]
+gui = ["PySide6-Essentials>=6.6"]
 local = ["transformers>=4.40", "sentencepiece", "torch"]
 dev = ["pytest>=8.0", "pyinstaller>=6.0"]
 
@@ -40,8 +40,8 @@ mcmt = "mc_mod_translator.cli:app"
 mcmt-gui = "mc_mod_translator.gui.main:main"
 
 [project.urls]
-Homepage = "https://github.com/your-name/mc-mod-translator"
-Issues = "https://github.com/your-name/mc-mod-translator/issues"
+Homepage = "https://github.com/Aa5000345/mc-mod-translator"
+Issues = "https://github.com/Aa5000345/mc-mod-translator/issues"
 
 [tool.setuptools.packages.find]
 include = ["mc_mod_translator*"]

@@ -1,6 +1,6 @@
 # MC Mod Translator — Minecraft 模组自动翻译工具
 
-[![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)](#)
+[![Version](https://img.shields.io/badge/version-0.3.1-blue.svg)](#)
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](#)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
